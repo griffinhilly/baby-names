@@ -51,12 +51,17 @@ details.adv{margin:8px 0 2px;border:1px solid #e2e2e2;border-radius:7px;padding:
 #famsuggest{position:relative} #family{margin-top:5px}
 .chip.fam{background:#e8f6f3;border-color:#a8d8cf}
 .act .rm:hover{background:#f7e9e9;border-color:#c99}
+.duelwrap{padding:2px 0 8px} .duelrow{display:flex;gap:8px;align-items:center;margin:8px 0 6px}
+.duelbtn{flex:1;min-width:0;padding:10px 6px;font-size:15px;font-weight:600;border:1px solid #c4d6f0;background:#eef3fb;border-radius:8px;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap} .duelbtn:hover{background:#dce9fa}
+.duelvs{font-size:11px;color:#999;flex:none} .duelfoot{display:flex;justify-content:space-between;font-size:11px;color:#888}
+.duelfoot a{color:#2c5fa8;cursor:pointer;text-decoration:underline}
 @media (max-width:760px){
   html,body{overflow-x:hidden;overflow-y:auto;max-width:100%} #app{flex-direction:column;height:auto;min-height:100vh;width:100%;max-width:100%;overflow-x:hidden}
   #side{width:100%;min-width:0;border-right:none;border-bottom:1px solid #e3e3e3;overflow:visible;padding:14px 14px 20px}
   #mapwrap{height:62vh;min-height:340px;flex:none;width:100%;max-width:100%;overflow:hidden} #map{width:100%!important;max-width:100%} .filters{grid-template-columns:1fr}
   .leg{font-size:10px;max-height:42vh;top:6px;right:6px;padding:6px 8px} .leg .dot{width:8px;height:8px;margin-right:5px}
   #search,#famsearch,.prow select,.lbrow select,.lbrow input,.filters select,.filters input,.mb{font-size:16px}
+  .duelbtn{font-size:16px;padding:12px 6px}
   .prow{gap:8px} .prow span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .prow select,#leanRows .prow .lvsel{width:auto;min-width:104px;max-width:48%;flex:none}
   .nm{font-size:16px} .act{flex:none} .act button{font-size:16px;padding:3px 11px}
@@ -82,6 +87,14 @@ details.adv{margin:8px 0 2px;border:1px solid #e2e2e2;border-radius:7px;padding:
     <button class="mb" data-m="sound">sounds alike</button>
     <button class="mb" data-m="culture">same culture</button>
     <button class="mb" data-m="era">same era</button></div>
+  <details class="adv" id="duelbox">
+    <summary>quick taste check (optional) — pick between two names</summary>
+    <div class="duelwrap">
+      <div class="fl">which fits your family better? (just helps me learn — doesn't change results yet)</div>
+      <div class="duelrow"><button class="duelbtn" id="duelA"></button><span class="duelvs">or</span><button class="duelbtn" id="duelB"></button></div>
+      <div class="duelfoot"><a id="duelPass">skip this pair</a><span id="duelcount"></span></div>
+    </div>
+  </details>
   <details class="adv">
     <summary>adjust manually (optional) — gender, culture, first letter</summary>
     <div class="leanbuild">
@@ -217,14 +230,23 @@ function passFilters(i){ return true; }  // all constraints are now graded leans
 function saveState(){
   try{
     const prefs={}; document.querySelectorAll("[id^=p_]").forEach(e=>{if(e.value!="nu")prefs[e.id]=e.value;});
-    localStorage.setItem(LS_STATE, JSON.stringify({seeds:seeds.map(i=>D.names[i]), disliked:[...disliked].map(i=>D.names[i]), family:family.map(i=>D.names[i]), leans, prefs, mode:curMode}));
+    localStorage.setItem(LS_STATE, JSON.stringify({v:2, seeds:seeds.map(i=>D.names[i]), disliked:[...disliked].map(i=>D.names[i]), family:family.map(i=>D.names[i]), leans, prefs, mode:curMode}));
   }catch(e){}
 }
-function logEvent(action,name){            // append-only judgment log, with the seed CONTEXT at decision time
+// v2 log schema: judgment events also carry IMPRESSIONS (`shown` = top names displayed at decision
+// time, names-only, capped) — soft negatives for a future learned ranker. Log is FIFO-capped so a
+// heavy user's export stays well under 1MB. v1 events (no `shown`) remain valid; consumers must
+// treat `shown` as optional.
+const LOG_CAP=1500, SHOWN_K=20, SHOWN_ACTS=new Set(["like","explore","dislike","duel","duelskip"]);
+let lastShown=[];  // names in the recommended list at last render (impression context)
+function logEvent(action,name,extra){      // append-only judgment log, with the seed CONTEXT at decision time
   if(!name||action=="restore")return;
   try{
     const log=JSON.parse(localStorage.getItem(LS_LOG)||"[]");
-    log.push({t:Date.now(),a:action,name,ctx:seeds.map(i=>D.names[i])});
+    const ev={t:Date.now(),a:action,name,ctx:seeds.map(i=>D.names[i])};
+    if(SHOWN_ACTS.has(action)&&lastShown.length)ev.shown=lastShown.slice(0,SHOWN_K);
+    if(extra)Object.assign(ev,extra);
+    log.push(ev); if(log.length>LOG_CAP)log.splice(0,log.length-LOG_CAP);
     localStorage.setItem(LS_LOG, JSON.stringify(log)); logCount=log.length; updateDataBar();
   }catch(e){}
 }
@@ -248,7 +270,7 @@ function updateDataBar(){
 }
 function exportData(){
   let log=[],state=null; try{log=JSON.parse(localStorage.getItem(LS_LOG)||"[]");state=JSON.parse(localStorage.getItem(LS_STATE)||"null");}catch(e){}
-  const blob=new Blob([JSON.stringify({exported:new Date().toISOString(),count:log.length,state,log},null,2)],{type:"application/json"});
+  const blob=new Blob([JSON.stringify({v:2,exported:new Date().toISOString(),count:log.length,state,log},null,2)],{type:"application/json"});
   const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="baby_name_prefs.json"; a.click();
 }
 function importData(e){
@@ -311,8 +333,9 @@ function renderLearned(){
 function query(){
   saveState(); renderLearned();
   const r=ranked(); const out=[]; for(const i of r){ if(family.includes(i)) continue; if(passFilters(i)) out.push(i); if(out.length>=80)break; }
+  lastShown = out.slice(0,SHOWN_K).map(i=>D.names[i]);   // impression context for the next judgment
   const res=$("results"), active=seeds.length||family.length||anyPref();
-  if(!active){res.innerHTML="<div class='empty'>Start by typing a name you like above — or set preferences below to browse.</div>";$("count").textContent="";drawMap([]);return;}
+  if(!active){res.innerHTML="<div class='empty'>Start by typing a name you like above — or set preferences below to browse.</div>";$("count").textContent="";lastShown=[];drawMap([]);return;}
   $("count").textContent = out.length+" recommended"+(out.length>=80?"+":"")+(seeds.length?("  ·  "+seeds.length+" pick"+(seeds.length>1?"s":"")):"  ·  browsing by preference")+(family.length?("  ·  "+family.length+" family"):"");
   let html="";
   if(seeds.length){
@@ -333,6 +356,54 @@ function query(){
   res.querySelectorAll(".dn").forEach(b=>b.onclick=e=>{e.stopPropagation();const i=+b.dataset.i;logEvent("dislike",D.names[i]);disliked.add(i);const k=seeds.indexOf(i);if(k>=0)seeds.splice(k,1);renderSeeds();query();});
   res.querySelectorAll(".rm").forEach(b=>b.onclick=e=>{e.stopPropagation();const i=+b.dataset.i;logEvent("unlike",D.names[i]);const k=seeds.indexOf(i);if(k>=0)seeds.splice(k,1);renderSeeds();query();});
   drawMap(out);
+}
+
+// ---------- duel mode (pure taste elicitation; logs clean pairwise judgments, ZERO effect on scoring) ----------
+// Pair selection: both names plausible under the current picks (top-150 of ranked(); popularity
+// top-600 respecting gender leans when no picks yet) but from different micro-neighborhoods
+// (sound-dot < 0.55 AND different culture-or-era-bin), so each answer discriminates rather than
+// confirms. Already-dueled pairs are not repeated.
+let duelPair=null, duelN=0;
+function duelPool(){
+  if(seeds.length) return ranked().slice(0,150);
+  const out=[]; for(let i=0;i<N&&out.length<600;i++){ if(!disliked.has(i)&&prefMult(i)>0) out.push(i); }
+  return out;  // D is total-sorted, so this = the most common names passing current leans
+}
+function duelSeen(a,b){
+  try{
+    const log=JSON.parse(localStorage.getItem(LS_LOG)||"[]"), na=D.names[a], nb=D.names[b];
+    return log.some(e=>(e.a=="duel"||e.a=="duelskip")&&((e.name==na&&(e.lose==nb||e.b==nb))||(e.name==nb&&(e.lose==na||e.b==na))));
+  }catch(err){ return false; }
+}
+function sampleDuel(){
+  const pool=duelPool();
+  if(pool.length<8){ duelPair=null; renderDuel(); return; }
+  const rnd=k=>Math.floor(Math.random()*k);
+  for(let t=0;t<25;t++){
+    const a=pool[rnd(Math.min(50,pool.length))];
+    let b=-1;
+    for(let u=0;u<40;u++){
+      const c=pool[rnd(pool.length)];
+      if(c==a)continue;
+      let sd_=0; const sa=D.snd[a],sc_=D.snd[c]; for(let k=0;k<SDIM;k++)sd_+=sa[k]*sc_[k];
+      if(sd_<0.55&&(D.fine[c]!=D.fine[a]||Math.abs(D.era[c]-D.era[a])>=1)){b=c;break;}
+      b=c;  // fallback: last draw if no different-neighborhood candidate found
+    }
+    if(b>=0&&b!=a&&!duelSeen(a,b)){ duelPair=[a,b]; renderDuel(); return; }
+  }
+  duelPair=null; renderDuel();
+}
+function renderDuel(){
+  const box=$("duelbox"); if(!box)return;
+  $("duelcount").textContent = duelN ? duelN+" answered — thanks!" : "";
+  const on=!!duelPair;
+  $("duelA").style.display=on?"":"none"; $("duelB").style.display=on?"":"none";
+  if(on){ $("duelA").textContent=D.names[duelPair[0]]; $("duelB").textContent=D.names[duelPair[1]]; }
+}
+function duelAnswer(w){
+  if(!duelPair)return;
+  logEvent("duel", D.names[duelPair[w]], {lose:D.names[duelPair[1-w]]});
+  duelN++; sampleDuel();
 }
 
 // ---------- map ----------
@@ -369,6 +440,9 @@ function drawMap(highlight){
   ae.onchange=()=>{const v=ae.value;if(v==="")return;const idx=+v;if(!leans.some(L=>L.dim=="eth"&&L.val===idx))leans.push({dim:"eth",val:idx,lvl:"pr1"});ae.value="";renderLeans();query();};
   $("addLtr").oninput=e=>{const c=e.target.value.trim().toLowerCase();e.target.value="";if(!/^[a-z]$/.test(c))return;if(!leans.some(L=>L.dim=="ltr"&&L.val===c))leans.push({dim:"ltr",val:c,lvl:"pr1"});renderLeans();query();};
   renderLeans();
+  $("duelA").onclick=()=>duelAnswer(0); $("duelB").onclick=()=>duelAnswer(1);
+  $("duelPass").onclick=()=>{ if(duelPair)logEvent("duelskip", D.names[duelPair[0]], {b:D.names[duelPair[1]]}); sampleDuel(); };
+  $("duelbox").addEventListener("toggle",()=>{ if($("duelbox").open)sampleDuel(); });
   $("leg").innerHTML = D.groups.map((g,k)=>`<div><span class='dot' style='background:${D.col[k]}'></span>${g.replace(/_/g,' ')}</div>`).join("");
   restoreState(); updateDataBar();              // bring back last session + show flywheel count
   (seeds.length||anyPref()) ? query() : drawMap([]);
